@@ -74,6 +74,43 @@ test('different cuts share the verified source across calls and service restart'
   await restarted.clip({...args,clip:{...f.clip,id:'third',startSeconds:10,endSeconds:16}});
   assert.equal(f.state.downloads,1);assert.equal(f.state.renders,3);
 });
+test('verified local original restores preview and render without querying the cloud',async t=>{
+  const f=await fixture(t),sourcesDir=path.join(f.directory,'sources');
+  await fs.mkdir(sourcesDir);
+  await fs.writeFile(path.join(sourcesDir,'original.mp4'),'original-media');
+  const source={...f.source,storedName:'original.mp4',durationSeconds:20};
+  const args={clip:f.clip,source,identity:{id:'owner'}};
+  const renderConfig={width:1080,height:1920,fps:30};
+  const recovery=createPlaybackRecovery({...f.options,sourcesDir,materialCenter:{configured:false,
+    getAsset:async()=>assert.fail('local recovery must not query cloud'),
+    downloadAsset:async()=>assert.fail('local recovery must not download cloud media')},
+    renderConfig,inspectMedia:async file=>({...await f.options.inspectMedia(file),width:1080,height:1920,frameRate:30,hasAudio:true}),
+    makeSegment:async input=>fs.writeFile(input.outputPath,'normalized')});
+  const preview=await recovery.clip(args);
+  const render=await recovery.clip({...args,purpose:'render'});
+  assert.equal(preview.kind,'reconstructed-clip-preview');
+  assert.equal(render.kind,'reconstructed-render-input');
+  assert.equal(f.state.downloads,0);
+  for(const result of [preview,render]){
+    const receipt=JSON.parse(await fs.readFile(result.path.replace('.mp4','.json')));
+    assert.equal(receipt.sourceBasis,'verified-local-original');
+    assert.equal(receipt.assetId,null);
+    assert.equal(receipt.originalSha256,source.contentSha256);
+  }
+});
+test('missing local original falls back to the exact cloud object; invalid local bytes do not',async t=>{
+  const f=await fixture(t),sourcesDir=path.join(f.directory,'sources');
+  await fs.mkdir(sourcesDir);
+  const args={clip:f.clip,source:{...f.source,storedName:'missing.mp4',durationSeconds:20},identity:{id:'owner'}};
+  const recovery=createPlaybackRecovery({...f.options,sourcesDir});
+  const cloud=await recovery.clip(args);
+  const receipt=JSON.parse(await fs.readFile(cloud.path.replace('.mp4','.json')));
+  assert.equal(receipt.sourceBasis,'verified-cloud-original');
+  assert.equal(f.state.downloads,1);
+  await fs.writeFile(path.join(sourcesDir,'changed.mp4'),'changed-media!');
+  await assert.rejects(recovery.clip({...args,source:{...args.source,storedName:'changed.mp4'},clip:{...f.clip,id:'changed'}}),/哈希与来源记录不一致/);
+  assert.equal(f.state.downloads,1);
+});
 test('corrupted cached source blocks a new cut without redownload or overwrite',async t=>{
   const f=await fixture(t),args={clip:f.clip,source:f.source,identity:{id:'owner'}};
   await f.recovery.clip(args);
